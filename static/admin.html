@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TelegramQ — admin</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%232AABEE'/><path d='M16 8v8l5 3' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="15"/><path d="M16 8v8l5 3"/></svg>
+      <span>TelegramQ</span>
+      <span class="tag">admin</span>
+    </div>
+    <div class="clock" title="Server time (Minsk)">
+      <span id="clock-time">--:--:--.---</span>
+      <span id="clock-offset" class="clock-offset"></span>
+    </div>
+    <a class="account-btn back" href="/">← Back to the app</a>
+  </header>
+
+  <main>
+    <div id="denied" class="card denied" hidden>
+      <h1>Admins only</h1>
+      <p class="muted" id="denied-text"></p>
+      <a class="primary-link" href="/">Go to the app</a>
+    </div>
+
+    <div id="admin" class="admin" hidden>
+      <section class="stats" id="stats"></section>
+
+      <div class="admin-cols">
+        <div class="admin-col">
+          <form id="compose" class="card compose" autocomplete="off">
+            <h2>Schedule a message</h2>
+            <p class="muted small">Sent from your own account, at the moment you choose.</p>
+
+            <div id="compose-chat"></div>
+
+            <label for="text-input" class="row-label">
+              <span>Message</span>
+              <select id="parse-mode" aria-label="Formatting">
+                <option value="md">Markdown</option>
+                <option value="html">HTML</option>
+                <option value="none">Plain text</option>
+              </select>
+            </label>
+            <textarea id="text-input" rows="4" placeholder="**bold**, __italic__, `code`, [link](https://…)" required></textarea>
+            <div class="counter muted" id="text-counter">0 / 4096</div>
+
+            <label for="when-input">Send at <span class="muted">(Minsk time)</span></label>
+            <input id="when-input" type="datetime-local" step="0.001" required>
+            <div class="chips" id="quick-times">
+              <button type="button" data-add="30">+30 s</button>
+              <button type="button" data-add="60">+1 min</button>
+              <button type="button" data-add="300">+5 min</button>
+              <button type="button" data-add="3600">+1 h</button>
+              <button type="button" data-round="60">Next :00</button>
+              <button type="button" data-round="3600">Next hour</button>
+            </div>
+            <div class="when-preview muted" id="when-preview">&nbsp;</div>
+
+            <fieldset class="options">
+              <label class="check"><input type="checkbox" id="opt-compensate" checked>
+                <span>Compensate network latency <span class="muted">— send RTT/2 early so it reaches Telegram on time (can be a few ms early)</span></span></label>
+              <label class="check"><input type="checkbox" id="opt-silent">
+                <span>Send silently <span class="muted">— no notification sound</span></span></label>
+              <label class="check"><input type="checkbox" id="opt-preview" checked>
+                <span>Show link preview</span></label>
+            </fieldset>
+
+            <p class="error" id="compose-error" role="alert" hidden></p>
+            <button class="primary" type="submit" id="compose-submit">Schedule</button>
+          </form>
+
+          <section class="card settings">
+            <h2>Line timing</h2>
+            <p class="muted small">How place-in-line messages hit the moment their line opens. Applies to
+              places already taken too.</p>
+            <label class="check"><input type="radio" name="line-timing" value="arrive">
+              <span><strong>Arrive on time</strong> <span class="muted">— sent half a round trip early so it reaches
+                Telegram at the line's time. Can land a few ms early (Telegram then dates it a second earlier).</span></span></label>
+            <label class="check"><input type="radio" name="line-timing" value="exact">
+              <span><strong>Never early</strong> <span class="muted">— sent at the line's time; reaches Telegram one
+                network trip later (typically 15–50 ms).</span></span></label>
+          </section>
+
+          <section class="card timetable-admin">
+            <div class="card-head">
+              <h2>Timetable</h2>
+              <button type="button" class="ghost small" id="tt-refresh">Check now</button>
+            </div>
+            <p class="muted small" id="tt-status"></p>
+            <table class="table" id="tt-days">
+              <thead><tr><th>Day</th><th>Classes</th><th>Groups</th><th>Read</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </section>
+        </div>
+
+        <div class="admin-col">
+          <section class="card queue">
+            <div class="queue-head">
+              <div class="tabs" role="tablist">
+                <button role="tab" aria-selected="true" data-tab="upcoming">Upcoming <span class="count" id="count-upcoming">0</span></button>
+                <button role="tab" aria-selected="false" data-tab="history">History</button>
+              </div>
+              <select id="kind-filter" aria-label="Show">
+                <option value="">All messages</option>
+                <option value="line">Places in line</option>
+                <option value="message">Admin messages</option>
+              </select>
+            </div>
+            <ul id="queue-list" class="queue-list"></ul>
+            <p id="queue-empty" class="empty muted" hidden></p>
+          </section>
+
+          <section class="card users">
+            <h2>Users</h2>
+            <table class="table" id="users">
+              <thead><tr><th>Name</th><th>Group</th><th>In line</th><th>Sent</th><th>Joined</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </section>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/admin.js" type="module"></script>
+</body>
+</html>

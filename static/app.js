@@ -1,155 +1,10 @@
-// TelegramQ frontend — no build step, no dependencies.
+// TelegramQ app: pick your group, take places in line. No build step, no dependencies.
 // Times are shown in Minsk time, the college's clock.
 
-const $ = (sel) => document.querySelector(sel);
-
-function h(tag, props = {}, ...children) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (v == null || v === false) continue;
-    if (k === 'class') el.className = v;
-    else if (k === 'dataset') Object.assign(el.dataset, v);
-    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-    else el.setAttribute(k, v === true ? '' : v);
-  }
-  for (const c of children.flat()) {
-    if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
-  }
-  return el;
-}
-
-// --- API -----------------------------------------------------------------
-
-class ApiError extends Error {
-  constructor(message, status) { super(message); this.status = status; }
-}
-
-async function api(path, { method = 'GET', body } = {}) {
-  const headers = { 'X-TelegramQ': '1' };
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const res = await fetch(path, {
-    method, headers, cache: 'no-store', credentials: 'same-origin',
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  let data = null;
-  try { data = await res.json(); } catch { /* empty body */ }
-  if (!res.ok) {
-    let msg = data?.detail ?? res.statusText;
-    if (Array.isArray(msg)) msg = msg.map((d) => d.msg).join('; ');
-    if (res.status === 401 && state.user) onLoggedOut(msg);
-    throw new ApiError(msg, res.status);
-  }
-  return data;
-}
-
-// --- clock (server time is the reference) ----------------------------------
-
-const clock = { offset: 0, rtt: null };
-const now = () => Date.now() + clock.offset;
-
-async function syncClock() {
-  let best = null;
-  for (let i = 0; i < 5; i++) {
-    const t0 = performance.now();
-    const w0 = Date.now();
-    const { now: server } = await api('/api/time');
-    const rtt = performance.now() - t0;
-    if (!best || rtt < best.rtt) best = { rtt, offset: server - (w0 + rtt / 2) };
-  }
-  clock.offset = best.offset;
-  clock.rtt = best.rtt;
-  const el = $('#clock-offset');
-  const off = Math.round(best.offset);
-  el.textContent = Math.abs(off) <= Math.max(5, best.rtt / 2)
-    ? 'browser clock in sync'
-    : `browser clock ${off > 0 ? 'behind' : 'ahead'} by ${Math.abs(off)} ms`;
-  el.classList.toggle('warn', Math.abs(off) > 250);
-  el.title = 'Countdowns use the server clock, which is what sends the messages.';
-}
-
-// --- formatting (Minsk time) -------------------------------------------------
-
-let utcOffset = 180 * 60000; // Europe/Minsk is UTC+3 all year; the server confirms it
-const wall = (ms) => new Date(ms + utcOffset); // read with getUTC*()
-const dayIndex = (ms) => Math.floor((ms + utcOffset) / 86400000);
-const pad = (n, w = 2) => String(n).padStart(w, '0');
-
-function fmtTime(ms) {
-  const d = wall(ms);
-  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)}`;
-}
-
-function fmtHM(ms) {
-  const d = wall(ms);
-  return `${d.getUTCHours()}:${pad(d.getUTCMinutes())}`;
-}
-
-function fmtDay(ms, long = false) {
-  const diff = dayIndex(ms) - dayIndex(now());
-  const date = wall(ms).toLocaleDateString('en-GB', {
-    timeZone: 'UTC', weekday: long ? 'long' : 'short', day: 'numeric', month: long ? 'long' : 'short',
-  });
-  const rel = { 0: 'Today', 1: 'Tomorrow', [-1]: 'Yesterday' }[diff];
-  if (!rel) return date;
-  return long ? `${rel} · ${date}` : rel;
-}
-
-const fmtDateTime = (ms) => `${fmtDay(ms)} ${fmtTime(ms)}`;
-
-// Mid-sentence: "today", "tomorrow", or "on Mon 9 Nov".
-function fmtDayInline(ms) {
-  const d = fmtDay(ms);
-  return ['Today', 'Tomorrow', 'Yesterday'].includes(d) ? d.toLowerCase() : `on ${d}`;
-}
-
-function fmtCountdown(ms) {
-  if (ms <= 0) return 'now';
-  const s = ms / 1000;
-  const d = Math.floor(s / 86400);
-  const hr = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = Math.floor(s % 60);
-  if (d) return `in ${d}d ${hr}h ${pad(m)}m`;
-  if (hr) return `in ${hr}h ${pad(m)}m ${pad(sec)}s`;
-  if (m) return `in ${m}m ${pad(sec)}s`;
-  return `in ${s.toFixed(1)}s`;
-}
-
-function fmtMs(v, signed = true) {
-  const a = Math.abs(v);
-  const num = a < 10 ? a.toFixed(2) : a.toFixed(1);
-  return `${signed ? (v < 0 ? '−' : '+') : ''}${num} ms`;
-}
-
-const AVATAR_COLORS = ['#e8746a', '#f0a35e', '#9b87e0', '#6cbf68', '#4fb8c4', '#5a9fe0', '#e46fa5'];
-
-function avatar(name, kind) {
-  let hash = 0;
-  for (const ch of name) hash = (hash * 31 + ch.codePointAt(0)) | 0;
-  const initials = kind === 'self'
-    ? '★'
-    : name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => [...w][0]).join('').toUpperCase() || '?';
-  return h('span', { class: 'avatar', style: `background:${AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length]}` }, initials);
-}
-
-let toastTimer;
-function toast(text) {
-  const el = $('#toast');
-  el.textContent = text;
-  el.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 3500);
-}
-
-function showError(el, err) {
-  el.textContent = err ? (err.message || String(err)) : '';
-  el.hidden = !err;
-}
-
-async function withBusy(button, fn) {
-  button.disabled = true;
-  try { return await fn(); } finally { button.disabled = false; }
-}
+import {
+  $, h, api, auth, now, syncClock, setUtcOffset, fmtTime, fmtHM, fmtDay, fmtDateTime, fmtDayInline,
+  avatar, toast, showError, withBusy, sentStats, tickCountdowns, loadDialogs, chatPicker,
+} from './common.js';
 
 // --- state -----------------------------------------------------------------
 
@@ -165,7 +20,6 @@ const state = {
   scheduleSignature: '',
   tab: 'upcoming',
   loginId: null,
-  peer: null, // chosen chat {peer, name, kind, forum}
   joining: null, // lesson whose join panel is open
 };
 
@@ -173,6 +27,8 @@ const UPCOMING = new Set(['pending', 'sending']);
 const LAST_CHAT_KEY = 'telegramq.lastChat';
 
 // --- login -----------------------------------------------------------------
+
+auth.onUnauthorized = (message) => { if (state.user) onLoggedOut(message); };
 
 function setLoginStep(step) {
   $('#phone-form').hidden = step !== 'phone';
@@ -300,131 +156,13 @@ function showApp() {
   $('#account').hidden = false;
   $('#account-avatar').replaceWith(Object.assign(avatar(name), { id: 'account-avatar' }));
   $('#account-name').textContent = name;
-  $('#account-info').textContent = [u.username && `@${u.username}`, u.phone && `+${u.phone}`].filter(Boolean).join(' · ');
+  $('#account-info').textContent = [u.username && `@${u.username}`, u.phone && `+${u.phone}`, `ID ${u.id}`]
+    .filter(Boolean).join(' · ');
+  $('#admin-link').hidden = !u.is_admin;
   loadDialogs();
   loadGroups().then(refreshSchedule);
   refreshEntries().then(schedulePoll);
 }
-
-// --- recipient combobox ----------------------------------------------------
-
-const peerInput = $('#peer-input');
-const peerList = $('#peer-list');
-const combo = { matches: [], active: -1 };
-
-const KIND_LABEL = { self: 'saved', user: 'user', bot: 'bot', group: 'group', channel: 'channel' };
-
-async function loadDialogs() {
-  try {
-    state.dialogs = await api('/api/dialogs');
-    if (document.activeElement === peerInput) renderPeerList();
-  } catch (err) {
-    if (err.status !== 401) toast(`Could not load chats: ${err.message}`);
-  }
-}
-
-function renderPeerList() {
-  const q = peerInput.value.trim().toLowerCase().replace(/^@/, '');
-  combo.matches = state.dialogs
-    .filter((d) => !q || d.name.toLowerCase().includes(q) || (d.username || '').toLowerCase().includes(q))
-    .slice(0, 50);
-  combo.active = combo.matches.length && q ? 0 : -1;
-
-  const items = combo.matches.map((d, i) => h('li', {
-    role: 'option',
-    'aria-selected': String(i === combo.active),
-    onmousedown: (e) => { e.preventDefault(); selectPeer(d); },
-  }, avatar(d.name, d.kind), h('span', { class: 'name' }, d.name, d.username ? h('span', { class: 'muted' }, `  @${d.username}`) : null),
-  h('span', { class: 'kind' }, d.forum ? 'topics' : (KIND_LABEL[d.kind] || d.kind))));
-
-  if (!items.length) {
-    items.push(h('li', { class: 'hint' }, state.dialogs.length
-      ? (q ? `No chat matches. “${peerInput.value.trim()}” will be looked up as a username, link or phone.` : 'No chats.')
-      : 'Loading chats…'));
-  }
-  peerList.replaceChildren(...items);
-  setPeerListOpen(true);
-}
-
-function setPeerListOpen(open) {
-  peerList.hidden = !open;
-  peerInput.setAttribute('aria-expanded', String(open));
-}
-
-function selectPeer(d, topicId = null, topicName = null) {
-  state.peer = d;
-  peerInput.value = d.name;
-  setPeerListOpen(false);
-  if (d.forum) loadTopics(d.peer, topicId, topicName);
-  else hideTopics();
-  updateJoinPreview();
-}
-
-// --- forum topics ------------------------------------------------------------
-
-const topicRow = $('#topic-row');
-const topicSelect = $('#topic-select');
-let topicsRequest = 0;
-
-const GENERAL_TOPIC = 1;
-
-function hideTopics() {
-  topicsRequest++;
-  topicRow.hidden = true;
-  topicSelect.replaceChildren();
-}
-
-async function loadTopics(peer, wantedId = null, wantedName = null) {
-  const req = ++topicsRequest;
-  topicRow.hidden = false;
-  topicSelect.disabled = true;
-  topicSelect.replaceChildren(h('option', {}, 'Loading topics…'));
-  try {
-    const topics = await api(`/api/topics?peer=${encodeURIComponent(peer)}`);
-    if (req !== topicsRequest) return;
-    if (wantedId != null && !topics.some((t) => t.id === wantedId)) {
-      topics.unshift({ id: wantedId, title: wantedName || `Topic ${wantedId}`, closed: false });
-    }
-    if (!topics.length) { hideTopics(); return; }
-    topicSelect.replaceChildren(...topics.map((t) => h('option', { value: t.id }, t.closed ? `${t.title} (closed)` : t.title)));
-    const pick = topics.find((t) => t.id === wantedId) ?? topics.find((t) => t.id === GENERAL_TOPIC) ?? topics[0];
-    topicSelect.value = String(pick.id);
-    topicSelect.disabled = false;
-    updateJoinPreview();
-  } catch (err) {
-    if (req !== topicsRequest) return;
-    hideTopics();
-    if (err.status !== 401) toast(`Could not load topics: ${err.message}`);
-  }
-}
-
-const selectedTopic = () => (topicRow.hidden || topicSelect.disabled ? null : Number(topicSelect.value));
-
-function moveActive(delta) {
-  if (!combo.matches.length) return;
-  combo.active = (combo.active + delta + combo.matches.length) % combo.matches.length;
-  [...peerList.children].forEach((li, i) => {
-    li.setAttribute('aria-selected', String(i === combo.active));
-    if (i === combo.active) li.scrollIntoView({ block: 'nearest' });
-  });
-}
-
-peerInput.addEventListener('input', () => { state.peer = null; hideTopics(); renderPeerList(); updateJoinPreview(); });
-peerInput.addEventListener('focus', () => { if (!state.peer) renderPeerList(); });
-peerInput.addEventListener('blur', () => setPeerListOpen(false));
-peerInput.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowDown') { e.preventDefault(); if (peerList.hidden) renderPeerList(); else moveActive(1); }
-  else if (e.key === 'ArrowUp') { e.preventDefault(); moveActive(-1); }
-  else if (e.key === 'Escape') setPeerListOpen(false);
-  else if (e.key === 'Enter' && !peerList.hidden && combo.active >= 0) {
-    e.preventDefault();
-    selectPeer(combo.matches[combo.active]);
-  }
-});
-
-const selectedTopicName = () => (selectedTopic() == null ? null : topicSelect.selectedOptions[0]?.textContent);
-
-topicSelect.addEventListener('change', () => updateJoinPreview());
 
 // --- timetable ---------------------------------------------------------------
 
@@ -501,7 +239,7 @@ async function refreshSchedule() {
   lastScheduleLoad = Date.now();
   try {
     const r = await api(`/api/schedule${state.group ? `?group=${encodeURIComponent(state.group)}` : ''}`);
-    utcOffset = r.utc_offset_minutes * 60000;
+    setUtcOffset(r.utc_offset_minutes);
     state.timetable = r.timetable;
     renderTimetableStatus();
     if (!state.groups.length && r.timetable.updated_at) loadGroups(); // the first download just finished
@@ -567,6 +305,8 @@ function renderLesson(l) {
 // --- taking a place ------------------------------------------------------------
 
 const joinPanel = $('#join-panel');
+const joinChat = chatPicker({ onChange: () => updateJoinPreview() });
+$('#join-chat').replaceWith(joinChat.el);
 
 function parkJoinPanel() {
   joinPanel.hidden = true;
@@ -581,12 +321,12 @@ function openJoin(lesson, focus = true) {
   row.append(joinPanel);
   joinPanel.hidden = false;
   if (switching) showError($('#join-error'), null);
-  if (!state.peer && !peerInput.value) {
+  if (joinChat.isEmpty) {
     const last = loadLastChat();
-    if (last) selectPeer(last.dialog, last.topicId, last.topicName);
+    if (last) joinChat.select(last.dialog, last.topicId, last.topicName);
   }
   updateJoinPreview();
-  if (focus) (state.peer ? $('#join-submit') : peerInput).focus();
+  if (focus) (joinChat.chosen ? $('#join-submit') : joinChat).focus();
 }
 
 function closeJoin() {
@@ -599,8 +339,7 @@ $('#join-cancel').addEventListener('click', closeJoin);
 function updateJoinPreview() {
   const l = state.joining;
   if (!l) return;
-  const topic = selectedTopicName();
-  const chat = state.peer ? (topic ? `${state.peer.name} › ${topic}` : state.peer.name) : 'the chat you pick';
+  const chat = joinChat.label() ?? 'the chat you pick';
   $('#join-preview').replaceChildren(
     `${fmtDay(l.send_at)} at `, h('strong', {}, fmtTime(l.send_at)),
     ' your account posts ', h('code', {}, `{your place} ${l.subject}`), ` in ${chat}. `,
@@ -612,7 +351,7 @@ function loadLastChat() {
 }
 
 function saveLastChat(entry) {
-  const dialog = state.peer ?? { peer: entry.peer_ref, name: entry.peer_name, kind: entry.peer_type, forum: entry.topic_id != null };
+  const dialog = joinChat.chosen ?? { peer: entry.peer_ref, name: entry.peer_name, kind: entry.peer_type, forum: entry.topic_id != null };
   localStorage.setItem(LAST_CHAT_KEY, JSON.stringify({ dialog, topicId: entry.topic_id, topicName: entry.topic_name }));
 }
 
@@ -622,7 +361,7 @@ joinPanel.addEventListener('submit', async (e) => {
   if (!lesson) return;
   const errEl = $('#join-error');
   showError(errEl, null);
-  const body = { lesson_id: lesson.id, peer: state.peer?.peer ?? peerInput.value.trim(), topic_id: selectedTopic() };
+  const body = { lesson_id: lesson.id, ...joinChat.value() };
   try {
     const entry = await withBusy($('#join-submit'), () => api('/api/lines', { method: 'POST', body }));
     saveLastChat(entry);
@@ -696,15 +435,7 @@ function renderQueue() {
 const LOCK_MS = 30000; // places are fixed this long before a line opens (lines.LOCK_SECONDS)
 
 function metaLine(m) {
-  if (m.status === 'sent') {
-    const parts = [`fired ${fmtTime(m.fired_at)}`];
-    if (m.timer_error_ms != null) parts.push(`timer ${fmtMs(m.timer_error_ms)}`);
-    if (m.rtt_ms != null) parts.push(`RTT ${fmtMs(m.rtt_ms, false)}`);
-    if (m.lead_ms) parts.push(`sent ${fmtMs(m.lead_ms, false)} early`);
-    if (m.arrival_error_ms != null) parts.push(`est. arrival ${fmtMs(m.arrival_error_ms)}`);
-    return h('div', { class: 'item-meta', title: 'Timer error: how far from the planned firing moment the request left the server.\n'
-      + 'Est. arrival: when the request is estimated to have reached Telegram (fired + RTT/2), relative to the target.' }, parts.join(' · '));
-  }
+  if (m.status === 'sent') return sentStats(m);
   if (m.error) return h('div', { class: 'item-meta' }, h('span', { class: 'err' }, m.error));
   if (m.status === 'pending') {
     return h('div', { class: 'item-meta' }, m.send_at - now() > LOCK_MS
@@ -760,9 +491,7 @@ async function removeEntry(m) {
 function tick() {
   const t = now();
   $('#clock-time').textContent = fmtTime(t);
-  for (const el of document.querySelectorAll('.countdown')) {
-    el.textContent = fmtCountdown(Number(el.dataset.at) - t);
-  }
+  tickCountdowns(t);
   // A line just opened: drop its "Take a place" button.
   if (state.days.some((d) => d.lessons.some((l) => l.send_at > renderedAt && l.send_at <= t))) renderDays();
 }

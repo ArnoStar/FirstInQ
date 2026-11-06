@@ -487,10 +487,11 @@ class Timetable:
             "refreshing": self._lock.locked(),
         }
 
-    async def refresh(self, manual: bool = False) -> None:
+    async def refresh(self, min_gap: float = 0) -> None:
+        """Check the schedule page and load new or changed days (not if one was checked < ``min_gap`` s ago)."""
         if not self.url or self._lock.locked():
             return
-        if manual and self.last_attempt and time.time() - self.last_attempt < self.MANUAL_REFRESH_GAP:
+        if self.last_attempt and time.time() - self.last_attempt < min_gap:
             return
         async with self._lock:
             self.last_attempt = time.time()
@@ -505,12 +506,37 @@ class Timetable:
         if changed and self.on_change:
             await self.on_change()
 
+    async def reload_day(self, day: dt.date) -> int:
+        """Download and parse a stored day's PDF again; returns the number of classes found."""
+        known = (await self.db.schedule_days()).get(day.isoformat())
+        if known is None:
+            raise LookupError(f"No timetable stored for {day:%d.%m.%Y}.")
+        async with self._lock:
+            async with self._client() as client:
+                lessons = await self._download(client, known["url"], day)
+            if not lessons:
+                raise ValueError("no classes found in the PDF")
+            await self.db.replace_day(day.isoformat(), known["url"], [lesson_row(x) for x in lessons])
+        log.info("Timetable for %s re-read: %d classes", day, len(lessons))
+        if self.on_change:
+            await self.on_change()
+        return len(lessons)
+
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=30, follow_redirects=True, transport=self.transport,
+                                 headers={"User-Agent": USER_AGENT})
+
+    @staticmethod
+    async def _download(client: httpx.AsyncClient, url: str, day: dt.date) -> list[Lesson]:
+        response = await client.get(url)
+        response.raise_for_status()
+        return await asyncio.to_thread(parse_pdf, response.content, day)
+
     async def _refresh(self) -> tuple[bool, list[str]]:
         changed = False
         errors: list[str] = []
         first = today()
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, transport=self.transport,
-                                     headers={"User-Agent": USER_AGENT}) as client:
+        async with self._client() as client:
             page = await client.get(self.url)
             page.raise_for_status()
             links = find_pdf_links(page.text, str(page.url))
@@ -523,9 +549,7 @@ class Timetable:
                 if known.get(day.isoformat(), {}).get("url") == url:
                     continue
                 try:
-                    response = await client.get(url)
-                    response.raise_for_status()
-                    lessons = await asyncio.to_thread(parse_pdf, response.content, day)
+                    lessons = await self._download(client, url, day)
                 except Exception as e:
                     log.warning("Could not read the timetable for %s (%s): %s", day, url, e)
                     errors.append(f"{day:%d.%m}: {e}")

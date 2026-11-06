@@ -20,6 +20,7 @@ services:
       MISSED_GRACE_SECONDS: ${MISSED_GRACE_SECONDS:-60}
       SCHEDULE_URL: ${SCHEDULE_URL-https://mrk.bsuir.by/en/schedule/}
       SCHEDULE_REFRESH_MINUTES: ${SCHEDULE_REFRESH_MINUTES:-15}
+      ADMINS: ${ADMINS:-}
       DATA_DIR: /data
     volumes:
       # Same folder `make run` uses, so you stay logged in whichever way you

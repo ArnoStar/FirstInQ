@@ -134,6 +134,39 @@ If the server was down when a line opened, the message is still sent on
 startup if it's at most `MISSED_GRACE_SECONDS` (default 60) late. Otherwise it
 is marked *missed*.
 
+## Admin panel
+
+Admins open **`/admin.html`** (or *Admin panel* in the account menu). An
+admin is anyone listed in `ADMINS` in `.env`, by Telegram user id or phone
+number, separated by commas:
+
+```sh
+ADMINS=+375 29 123-45-67, 123456789
+```
+
+Restart the server after changing it. Admins log in like everyone else; your
+user id is shown in the account menu. The panel has:
+
+- **Schedule a message:** free-form text (Markdown, HTML or plain) to any chat
+  at a time you choose, to the millisecond. It's sent from **your own**
+  account; the panel never posts as other users.
+- **All messages:** everyone's places in line and admin messages, upcoming and
+  sent, with who sends them, countdowns and timing stats. Admins can cancel
+  any pending one; the owner sees "Cancelled by an admin", and everyone behind
+  in that line moves up.
+- **Users:** groups, places in line, sent messages. *Remove* gives up their
+  places, ends TelegramQ's Telegram session on their account and deletes their
+  data (they can log in again).
+- **Line timing:** *Arrive on time* (default) sends half a round trip early so
+  the message reaches Telegram at the line's time, which can be a few ms early.
+  *Never early* sends at the line's time, so it arrives one network trip
+  (typically 15–50 ms) later. The change applies to places already taken.
+- **Timetable:** the stored days with their class and group counts, *Check
+  now*, and *Re-read* to parse a day's PDF again.
+
+Sent messages show the time Telegram stamped on them (whole seconds), so you
+can see whether one landed before the line opened.
+
 ## Security
 
 - The Telethon session string is a full login to your Telegram account. It is
@@ -170,13 +203,13 @@ two real daily PDFs in `tests/fixtures/`.
 app/
   main.py        FastAPI app: routes, auth cookies, error mapping
   timetable.py   reads the college's daily PDFs; when each class's line opens
-  lines.py       places in line: join, leave, move up, follow timetable changes
+  lines.py       places in line: join, leave, move up, follow timetable changes, timing
   scheduler.py   precise per-message timers, RTT measurement, sending
   telegram.py    Telethon client pool, phone/code/2FA login, chat resolution
   db.py          SQLite (aiosqlite) storage
   security.py    session encryption, token hashing
   config.py      settings from environment / .env
-static/          single-page UI (plain HTML/CSS/JS, no build step)
+static/          UI (plain HTML/CSS/JS, no build step): app, admin panel, shared common.js
 Dockerfile, compose.yaml   container image and one-command deployment
 docker/          build-time hook that keeps downloads working behind VPNs
 tests/

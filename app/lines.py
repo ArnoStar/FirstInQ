@@ -8,6 +8,12 @@ no particular order.
 
 Leaving moves everyone behind you up one place, until LOCK_SECONDS before the
 line opens. From then on places are fixed: the messages are being prepared.
+
+How the moment is hit is an admin setting (``timing``):
+  "arrive"  send half a round trip early, so the message reaches Telegram at
+            the line's time. Network jitter can make it a few ms early.
+  "exact"   send at the line's time. Never early; it reaches Telegram one
+            network trip (typically 15-50 ms) later.
 """
 
 import asyncio
@@ -19,6 +25,7 @@ from .scheduler import PREPARE_LEAD, Scheduler
 from .telegram import UserFacingError
 
 LOCK_SECONDS = PREPARE_LEAD + 10
+TIMINGS = ("arrive", "exact")
 
 
 def line_text(place: int, subject: str) -> str:
@@ -30,6 +37,20 @@ class Lines:
         self.db = db
         self.scheduler = scheduler
         self._lock = asyncio.Lock()  # places are read and assigned atomically
+        self.timing = "arrive"
+
+    async def start(self) -> None:
+        self.timing = await self.db.get_setting("line_timing", "arrive")
+
+    async def set_timing(self, timing: str) -> None:
+        """Change how line messages hit their moment, for pending ones too."""
+        if timing not in TIMINGS:
+            raise ValueError(timing)
+        async with self._lock:
+            await self.db.set_setting("line_timing", timing)
+            self.timing = timing
+            # The scheduler re-reads each message shortly before sending it.
+            await self.db.set_pending_line_compensation(timing == "arrive")
 
     async def join(self, user_id: int, lesson: dict[str, Any], peer: dict[str, Any]) -> dict[str, Any]:
         """Take the next place in the line for ``lesson`` in the chat ``peer`` (from ``resolve_peer``)."""
@@ -48,7 +69,7 @@ class Lines:
                 parse_mode="none",
                 silent=0,
                 link_preview=0,
-                compensate_latency=1,
+                compensate_latency=int(self.timing == "arrive"),
                 send_at=lesson["send_at"],
                 status="pending",
                 lesson_key=lesson["lesson_key"],
@@ -62,16 +83,24 @@ class Lines:
             return row
 
     async def leave(self, user_id: int, msg_id: int) -> dict[str, Any]:
+        return await self.cancel(msg_id, user_id=user_id)
+
+    async def cancel(self, msg_id: int, user_id: int | None = None, error: str | None = None) -> dict[str, Any]:
+        """Cancel a pending message (a place in line, or an admin's message).
+
+        With ``user_id``, only that user's own message.
+        """
         async with self._lock:
             row = await self.db.get_message(msg_id, user_id)
             if row is None:
                 raise UserFacingError("Not found.", 404)
             if row["status"] != "pending":
-                raise UserFacingError("You can only leave a line before it opens.", 409)
+                raise UserFacingError("Only messages that haven't been sent yet can be cancelled.", 409)
             if not self.scheduler.cancel(msg_id):
-                raise UserFacingError("Too late: your message is being sent right now.", 409)
-            await self.db.update_message(msg_id, status="cancelled")
-            await self._renumber(row)
+                raise UserFacingError("Too late: the message is being sent right now.", 409)
+            await self.db.update_message(msg_id, status="cancelled", error=error)
+            if row["lesson_key"]:
+                await self._renumber(row)
             return await self.db.get_message(msg_id)
 
     async def drop_user(self, user_id: int, reason: str) -> None:

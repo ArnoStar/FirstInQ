@@ -21,6 +21,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SECRET_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("SCHEDULE_URL", "")  # never fetch the real timetable
+    monkeypatch.setenv("ADMINS", "+375 29 123-45-67, 9")  # see test_admin.py
 
     from app import main
     from app.telegram import TelegramAccounts
@@ -43,12 +44,12 @@ def call(client, fn):
     return client.portal.call(fn)
 
 
-def login(client, user_id=1):
+def login(client, user_id=1, phone=None):
     from app.security import hash_token
 
     db = client.app.state.db
     call(client, lambda: db.upsert_user(id=user_id, first_name=f"User{user_id}", last_name="",
-                                        username=f"user{user_id}", phone=str(user_id), session_enc="x"))
+                                        username=f"user{user_id}", phone=phone or str(user_id), session_enc="x"))
     call(client, lambda: db.create_web_session(hash_token(f"tok{user_id}"), user_id, 3600))
     act_as(client, user_id)
 

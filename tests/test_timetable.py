@@ -170,4 +170,10 @@ async def test_refresh_downloads_new_days_once(tmp_path):
     await timetable.refresh()
     assert requests == ["/en/schedule/", "/mediafiles/schedule/01.01.2020-old.pdf"]  # the known day isn't fetched again
     assert changes == [True]
+
+    (stored,) = [d for d in await db.schedule_day_stats() if d["day"] == tomorrow.isoformat()]
+    assert await timetable.reload_day(tomorrow) == stored["classes"] == 177
+    assert changes == [True, True]
+    with pytest.raises(LookupError):
+        await timetable.reload_day(dt.date(2001, 1, 1))
     await db.close()

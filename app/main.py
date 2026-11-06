@@ -2,12 +2,13 @@ import asyncio
 import datetime as dt
 import logging
 import os
+import re
 import sys
 import time
 from contextlib import asynccontextmanager, suppress
 from itertools import groupby
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -23,7 +24,7 @@ except ImportError:  # Windows
 from .config import ConfigError, load_settings
 from .db import Database
 from .lines import Lines
-from .scheduler import Scheduler
+from .scheduler import Scheduler, parse_text
 from .security import SessionCipher, hash_token, load_or_create_key, new_token
 from .telegram import (
     REVOKED_ERRORS,
@@ -52,6 +53,7 @@ log = logging.getLogger("telegramq")
 
 COOKIE_NAME = "tq_session"
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+MAX_SCHEDULE_AHEAD = 366 * 24 * 3600
 REVOKED_MESSAGE = "Your Telegram session was terminated. Log in again."
 
 
@@ -104,6 +106,7 @@ async def lifespan(app: FastAPI):
         await db.delete_web_sessions_for_user(user_id)
 
     accounts.on_revoked = on_revoked
+    await lines.start()
     await scheduler.start()
     await timetable.start()
     janitor = asyncio.create_task(_janitor(db, logins))
@@ -226,8 +229,8 @@ async def server_time():
 
 
 @app.get("/api/me")
-async def me(user: dict = Depends(current_user)):
-    return user_to_dict(user)
+async def me(request: Request, user: dict = Depends(current_user)):
+    return {**user_to_dict(user), "is_admin": is_admin(request, user)}
 
 
 @app.post("/api/auth/phone")
@@ -327,7 +330,7 @@ async def schedule(request: Request, group: str | None = None, user: dict = Depe
 @app.post("/api/schedule/refresh")
 async def refresh_schedule(request: Request, user: dict = Depends(current_user)):
     timetable = request.app.state.timetable
-    await timetable.refresh(manual=True)
+    await timetable.refresh(min_gap=Timetable.MANUAL_REFRESH_GAP)
     return timetable.status()
 
 
@@ -361,6 +364,7 @@ def entry_out(row: dict[str, Any], scheduler: Scheduler) -> dict[str, Any]:
         "lead_ms": row["lead_ms"],
         "rtt_ms": row["rtt_ms"],
         "tg_message_id": row["tg_message_id"],
+        "tg_date": ms(row["tg_date"]),  # Telegram's own timestamp (whole seconds)
         "error": row["error"],
         "timer_error_ms": None,
         "arrival_error_ms": None,
@@ -390,7 +394,7 @@ async def topics(peer: str, request: Request, q: str | None = None, user: dict =
 async def my_lines(request: Request, user: dict = Depends(current_user)):
     scheduler = request.app.state.scheduler
     rows = await request.app.state.db.list_messages(user["id"])
-    return [entry_out(r, scheduler) for r in rows]
+    return [entry_out(r, scheduler) for r in rows if r["lesson_key"]]  # admins' own messages are in the panel
 
 
 @app.post("/api/lines", status_code=201)
@@ -424,6 +428,192 @@ async def remove_entry(entry_id: int, request: Request, user: dict = Depends(cur
         raise UserFacingError("Leave the line before removing it.", 409)
     await state.db.delete_message(entry_id)
     return {"ok": True}
+
+
+# --- admin ------------------------------------------------------------------------
+
+def is_admin(request: Request, user: dict[str, Any]) -> bool:
+    """Admins are listed in ADMINS (.env) by Telegram user id or phone number."""
+    admins = request.app.state.settings.admins
+    phone = re.sub(r"\D", "", user.get("phone") or "")
+    return str(user["id"]) in admins or (bool(phone) and phone in admins)
+
+
+async def current_admin(request: Request, user: dict = Depends(current_user)) -> dict[str, Any]:
+    if not is_admin(request, user):
+        raise HTTPException(403, "Only admins can do this.")
+    return user
+
+
+def display_name(first: str | None, last: str | None, username: str | None) -> str:
+    return " ".join(x for x in (first, last) if x) or (f"@{username}" if username else "(no name)")
+
+
+def admin_entry_out(row: dict[str, Any], scheduler: Scheduler) -> dict[str, Any]:
+    return {
+        **entry_out(row, scheduler),
+        "kind": "line" if row["lesson_key"] else "message",
+        "user_id": row["user_id"],
+        "user_name": display_name(row.get("user_first_name"), row.get("user_last_name"), row.get("user_username")),
+        "parse_mode": row["parse_mode"],
+        "silent": bool(row["silent"]),
+        "link_preview": bool(row["link_preview"]),
+        "compensate_latency": bool(row["compensate_latency"]),
+    }
+
+
+class NewMessage(BaseModel):
+    peer: str = Field(min_length=1, max_length=256)
+    text: str = Field(min_length=1, max_length=20000)
+    send_at: float = Field(description="Unix epoch in milliseconds")
+    topic_id: int | None = Field(default=None, ge=1, description="Forum topic; omit for General / non-forums")
+    parse_mode: Literal["md", "html", "none"] = "md"
+    silent: bool = False
+    link_preview: bool = True
+    compensate_latency: bool = True
+
+
+class SettingsIn(BaseModel):
+    line_timing: Literal["arrive", "exact"]
+
+
+@app.get("/api/admin/overview")
+async def admin_overview(request: Request, admin: dict = Depends(current_admin)):
+    state = request.app.state
+    pending = await state.db.pending_messages()
+    return {
+        "users": len(await state.db.list_users()),
+        "pending": len(pending),
+        "pending_lines": sum(1 for r in pending if r["lesson_key"]),
+        "next_send_at": ms(pending[0]["send_at"]) if pending else None,
+        "timetable": state.timetable.status(),
+        "line_timing": state.lines.timing,
+    }
+
+
+@app.get("/api/admin/messages")
+async def admin_messages(request: Request, upcoming: bool = True, admin: dict = Depends(current_admin)):
+    state = request.app.state
+    return [admin_entry_out(r, state.scheduler) for r in await state.db.all_messages(upcoming)]
+
+
+@app.post("/api/admin/messages", status_code=201)
+async def admin_schedule_message(body: NewMessage, request: Request, admin: dict = Depends(current_admin)):
+    """Schedule a free-form message, sent from the admin's own account."""
+    state = request.app.state
+    send_at = body.send_at / 1000
+    now = time.time()
+    if send_at < now - 1:
+        raise UserFacingError("That time is in the past.")
+    if send_at > now + MAX_SCHEDULE_AHEAD:
+        raise UserFacingError("You can schedule at most one year ahead.")
+    try:
+        parse_text(body.text, body.parse_mode)
+    except ValueError as e:
+        raise UserFacingError(str(e))
+    client = await state.accounts.get(admin["id"])
+    peer = await resolve_peer(client, body.peer, body.topic_id)
+    row = await state.db.create_message(
+        user_id=admin["id"],
+        **peer,
+        text=body.text,
+        parse_mode=body.parse_mode,
+        silent=int(body.silent),
+        link_preview=int(body.link_preview),
+        compensate_latency=int(body.compensate_latency),
+        send_at=send_at,
+        status="pending",
+    )
+    state.scheduler.schedule(row)
+    names = {"user_first_name": admin["first_name"], "user_last_name": admin["last_name"],
+             "user_username": admin["username"]}
+    return admin_entry_out({**row, **names}, state.scheduler)
+
+
+@app.post("/api/admin/messages/{msg_id}/cancel")
+async def admin_cancel_message(msg_id: int, request: Request, admin: dict = Depends(current_admin)):
+    state = request.app.state
+    row = await state.db.get_message(msg_id)
+    own = row is not None and row["user_id"] == admin["id"]
+    await state.lines.cancel(msg_id, error=None if own else "Cancelled by an admin.")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/messages/{msg_id}")
+async def admin_remove_message(msg_id: int, request: Request, admin: dict = Depends(current_admin)):
+    db = request.app.state.db
+    row = await db.get_message(msg_id)
+    if row is None:
+        raise HTTPException(404, "Not found.")
+    if row["status"] == "pending":
+        raise UserFacingError("Cancel the message before removing it.", 409)
+    await db.delete_message(msg_id)
+    return {"ok": True}
+
+
+@app.get("/api/admin/users")
+async def admin_users(request: Request, admin: dict = Depends(current_admin)):
+    return [{
+        **user_to_dict(u),
+        "name": display_name(u["first_name"], u["last_name"], u["username"]),
+        "group_name": u["group_name"],
+        "pending": u["pending"],
+        "sent": u["sent"],
+        "created_at": ms(u["created_at"]),
+        "is_admin": is_admin(request, u),
+        "is_you": u["id"] == admin["id"],
+    } for u in await request.app.state.db.list_users()]
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_remove_user(user_id: int, request: Request, admin: dict = Depends(current_admin)):
+    """Disconnect a user: give up their places, end TelegramQ's Telegram session, delete their data."""
+    state = request.app.state
+    if user_id == admin["id"]:
+        raise UserFacingError("To disconnect your own account, use the account menu.", 409)
+    if await state.db.get_user(user_id) is None:
+        raise HTTPException(404, "No such user.")
+    await state.lines.drop_user(user_id, "Cancelled: an admin removed this account.")
+    await state.accounts.log_out(user_id)
+    await state.db.delete_user(user_id)  # cascades to web sessions and messages
+    return {"ok": True}
+
+
+async def _timetable_out(state) -> dict[str, Any]:
+    days = [{**d, "fetched_at": ms(d["fetched_at"])} for d in await state.db.schedule_day_stats()]
+    return {**state.timetable.status(), "interval_minutes": state.timetable.interval / 60, "days": days}
+
+
+@app.get("/api/admin/timetable")
+async def admin_timetable(request: Request, admin: dict = Depends(current_admin)):
+    return await _timetable_out(request.app.state)
+
+
+@app.post("/api/admin/timetable/refresh")
+async def admin_refresh_timetable(request: Request, admin: dict = Depends(current_admin)):
+    state = request.app.state
+    if not state.timetable.url:
+        raise UserFacingError("Reading the timetable is turned off (SCHEDULE_URL is empty).", 409)
+    await state.timetable.refresh()
+    return await _timetable_out(state)
+
+
+@app.post("/api/admin/timetable/days/{day}/reload")
+async def admin_reload_day(day: dt.date, request: Request, admin: dict = Depends(current_admin)):
+    state = request.app.state
+    try:
+        classes = await state.timetable.reload_day(day)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise UserFacingError(f"Could not re-read {day:%d.%m.%Y}: {e}", 502)
+    return {**await _timetable_out(state), "classes": classes}
+
+
+@app.put("/api/admin/settings")
+async def admin_settings(body: SettingsIn, request: Request, admin: dict = Depends(current_admin)):
+    await request.app.state.lines.set_timing(body.line_timing)
+    return {"line_timing": body.line_timing}
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

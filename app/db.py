@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS lessons (
     details     TEXT NOT NULL DEFAULT ''
 );
 
+-- Admin settings (see Lines.timing).
+CREATE TABLE IF NOT EXISTS settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_lessons_group ON lessons(group_name, start_at);
 CREATE INDEX IF NOT EXISTS idx_lessons_day ON lessons(day);
 """
@@ -223,12 +229,38 @@ class Database:
         rows = await self._all("SELECT id FROM messages WHERE user_id = ? AND status = 'pending'", (user_id,))
         return [r["id"] for r in rows]
 
+    async def all_messages(self, upcoming: bool, limit: int = 500) -> list[dict[str, Any]]:
+        """Every user's messages, with the sender's name: pending ones soonest first, others latest first."""
+        where, order = ("m.status = 'pending'", "m.send_at") if upcoming else ("m.status != 'pending'", "m.send_at DESC")
+        return await self._all(
+            f"""SELECT m.*, u.first_name AS user_first_name, u.last_name AS user_last_name,
+                      u.username AS user_username
+               FROM messages m JOIN users u ON u.id = m.user_id
+               WHERE {where} ORDER BY {order} LIMIT ?""", (limit,))
+
     async def update_message(self, msg_id: int, **fields: Any) -> None:
         sets = ", ".join(f"{k} = ?" for k in fields)
         await self._exec(f"UPDATE messages SET {sets} WHERE id = ?", (*fields.values(), msg_id))
 
     async def delete_message(self, msg_id: int) -> None:
         await self._exec("DELETE FROM messages WHERE id = ?", (msg_id,))
+
+    async def list_users(self) -> list[dict[str, Any]]:
+        return await self._all(
+            """SELECT u.id, u.first_name, u.last_name, u.username, u.phone, u.group_name, u.created_at, u.updated_at,
+                      (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.id AND m.status = 'pending') AS pending,
+                      (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.id AND m.status = 'sent') AS sent
+               FROM users u ORDER BY u.created_at""")
+
+    # --- settings --------------------------------------------------------------
+
+    async def get_setting(self, key: str, default: str) -> str:
+        row = await self._one("SELECT value FROM settings WHERE key = ?", (key,))
+        return row["value"] if row else default
+
+    async def set_setting(self, key: str, value: str) -> None:
+        await self._exec("INSERT INTO settings (key, value) VALUES (?, ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
     # --- lines ---------------------------------------------------------------
 
@@ -245,6 +277,10 @@ class Database:
             return await self._all("SELECT * FROM messages WHERE status = 'pending' AND lesson_key IS NOT NULL")
         return await self._all("SELECT * FROM messages WHERE status = 'pending' AND lesson_key IS NOT NULL "
                                "AND user_id = ?", (user_id,))
+
+    async def set_pending_line_compensation(self, compensate: bool) -> None:
+        await self._exec("UPDATE messages SET compensate_latency = ? WHERE status = 'pending' AND lesson_key IS NOT NULL",
+                         (int(compensate),))
 
     async def user_line_entries(self, user_id: int, lesson_keys: list[str]) -> list[dict[str, Any]]:
         if not lesson_keys:
@@ -282,6 +318,12 @@ class Database:
         except BaseException:
             await self.conn.rollback()
             raise
+
+    async def schedule_day_stats(self) -> list[dict[str, Any]]:
+        return await self._all(
+            """SELECT d.day, d.url, d.fetched_at, COUNT(l.id) AS classes, COUNT(DISTINCT l.group_name) AS groups
+               FROM schedule_days d LEFT JOIN lessons l ON l.day = d.day
+               GROUP BY d.day ORDER BY d.day DESC""")
 
     async def prune_days(self, before_day: str) -> None:
         await self.conn.execute("DELETE FROM lessons WHERE day < ?", (before_day,))

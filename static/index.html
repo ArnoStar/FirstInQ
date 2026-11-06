@@ -24,6 +24,7 @@
       </button>
       <div class="menu" id="account-menu" role="menu" hidden>
         <div class="menu-info" id="account-info"></div>
+        <a role="menuitem" id="admin-link" href="/admin.html" hidden>Admin panel</a>
         <button role="menuitem" id="logout-btn">Sign out of this browser</button>
         <button role="menuitem" class="danger" id="disconnect-btn">Disconnect Telegram account…</button>
       </div>
@@ -103,16 +104,7 @@
 
       <!-- Moved under the class you're taking a place for. -->
       <form id="join-panel" class="join" autocomplete="off" hidden>
-        <label for="peer-input">Post in</label>
-        <div class="combo" id="peer-combo">
-          <input id="peer-input" placeholder="Search chats, or type @username / t.me link" role="combobox"
-                 aria-expanded="false" aria-controls="peer-list" aria-autocomplete="list" required>
-          <ul id="peer-list" class="combo-list" role="listbox" hidden></ul>
-        </div>
-        <div id="topic-row" hidden>
-          <label for="topic-select">Topic</label>
-          <select id="topic-select"></select>
-        </div>
+        <div id="join-chat"></div>
         <p class="join-preview" id="join-preview"></p>
         <p class="error" id="join-error" role="alert" hidden></p>
         <div class="join-actions">

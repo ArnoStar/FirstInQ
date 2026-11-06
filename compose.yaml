@@ -1,0 +1,36 @@
+# Start with:  docker compose up -d --build   (or: make up)
+# Settings come from .env in this directory (see .env.example).
+
+services:
+  telegramq:
+    build: .
+    image: telegramq
+    container_name: telegramq
+    restart: unless-stopped
+    ports:
+      # Only reachable from this machine by default. Set BIND=0.0.0.0 to expose
+      # it (put an HTTPS reverse proxy in front and set COOKIE_SECURE=true).
+      - "${BIND:-127.0.0.1}:${PORT:-8080}:8080"
+    environment:
+      TG_API_ID: ${TG_API_ID:?Set TG_API_ID in .env (get it at https://my.telegram.org)}
+      TG_API_HASH: ${TG_API_HASH:?Set TG_API_HASH in .env (get it at https://my.telegram.org)}
+      SECRET_KEY: ${SECRET_KEY:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      WEB_SESSION_DAYS: ${WEB_SESSION_DAYS:-30}
+      MISSED_GRACE_SECONDS: ${MISSED_GRACE_SECONDS:-60}
+      SCHEDULE_URL: ${SCHEDULE_URL-https://mrk.bsuir.by/en/schedule/}
+      SCHEDULE_REFRESH_MINUTES: ${SCHEDULE_REFRESH_MINUTES:-15}
+      DATA_DIR: /data
+    volumes:
+      # Same folder `make run` uses, so you stay logged in whichever way you
+      # start it. Only one instance can use it at a time (it is locked).
+      - ${DATA_PATH:-./data}:/data
+    # Give in-flight sends time to finish on shutdown.
+    stop_grace_period: 20s
+
+networks:
+  default:
+    driver_opts:
+      # 1420 = WireGuard's MTU. Docker's default of 1500 silently drops large
+      # packets behind such VPNs, which stalls the connection to Telegram.
+      com.docker.network.driver.mtu: ${DOCKER_MTU:-1420}
